@@ -99,7 +99,7 @@ class _vcf_metadata_parser(object):
             length=(?P<length>-?\d+)
             .*
             >''', re.VERBOSE)
-        self.meta_pattern = re.compile(r'''##(?P<key>.+?)=(?P<val>.+)''')
+        self.meta_pattern = re.compile(r'''##(?P<key>\w+?)=(?P<val>.+)''')
 
     def vcf_field_count(self, num_str):
         """Cast vcf header numbers to integer or None"""
@@ -178,7 +178,7 @@ class _vcf_metadata_parser(object):
         # Removing initial hash marks and final equal sign
         key = items[0][2:-1]
         hashItems = items[1].split(',')
-        val = OrderedDict(item.split("=") for item in hashItems)
+        val = items[1] # OrderedDict(item.split("=") for item in hashItems)
         return key, val
 
     def read_meta(self, meta_string):
