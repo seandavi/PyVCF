@@ -59,15 +59,15 @@ a ``True`` value. Integers and floats are handled exactly as you'd expect::
     >>> print record.INFO['AF']
     [0.5]
 
-There are a number of convienience methods and properties for each ``Record`` allowing you to
+There are a number of convenience methods and properties for each ``Record`` allowing you to
 examine properties of interest::
 
     >>> print record.num_called, record.call_rate, record.num_unknown
     3 1.0 0
     >>> print record.num_hom_ref, record.num_het, record.num_hom_alt
     1 1 1
-    >>> print record.nucl_diversity, record.aaf
-    0.6 0.5
+    >>> print record.nucl_diversity, record.aaf, record.heterozygosity
+    0.6 [0.5] 0.5
     >>> print record.get_hets()
     [Call(sample=NA00002, CallData(GT=1|0, GQ=48, DP=8, HQ=[51, 51]))]
     >>> print record.is_snp, record.is_indel, record.is_transition, record.is_deletion
@@ -143,20 +143,32 @@ ALT records are actually classes, so that you can interrogate them::
     >>> print bnd.withinMainAssembly, bnd.orientation, bnd.remoteOrientation, bnd.connectingSequence
     True False True T
 
-Random access is supported for files with tabix indexes.  Simply call fetch for the
-region you are interested in::
+The Reader supports retrieval of records within designated regions for
+files with tabix indexes via the fetch method. Pass in a chromosome,
+and, optionally, start and end coordinates, for the regions of
+interest::
 
     >>> vcf_reader = vcf.Reader(filename='vcf/test/tb.vcf.gz')
-    >>> for record in vcf_reader.fetch('20', 1110696, 1230237):  # doctest: +SKIP
+    >>> # fetch all records on chromosome 20 from base 1110696 through 1230237
+    >>> for record in vcf_reader.fetch('20', 1110695, 1230237):  # doctest: +SKIP
     ...     print record
     Record(CHROM=20, POS=1110696, REF=A, ALT=[G, T])
     Record(CHROM=20, POS=1230237, REF=T, ALT=[None])
 
-Or extract a single row::
+Note that the start and end coordinates are in the zero-based, half-open
+coordinate system, similar to ``_Record.start`` and ``_Record.end``. The
+very first base of a chromosome is index 0, and the the region includes
+bases up to, but not including the base at the end coordinate. For
+example::
 
-    >>> print vcf_reader.fetch('20', 1110696)  # doctest: +SKIP
-    Record(CHROM=20, POS=1110696, REF=A, ALT=[G, T])
+    >>> # fetch all records on chromosome 4 from base 11 through 20
+    >>> vcf_reader.fetch('4', 10, 20)   # doctest: +SKIP
 
+would include all records overlapping a 10 base pair region from the
+11th base of through the 20th base (which is at index 19) of chromosome
+4. It would not include the 21st base (at index 20). (See
+http://genomewiki.ucsc.edu/index.php/Coordinate_Transforms for more
+information on the zero-based, half-open coordinate system.)
 
 The ``Writer`` class provides a way of writing a VCF file.  Currently, you must specify a
 template ``Reader`` which provides the metadata::
@@ -176,5 +188,6 @@ from vcf.parser import Reader, Writer
 from vcf.parser import VCFReader, VCFWriter
 from vcf.filters import Base as Filter
 from vcf.parser import RESERVED_INFO, RESERVED_FORMAT
+from vcf.sample_filter import SampleFilter
 
-VERSION = '0.6.3'
+VERSION = '0.6.7'

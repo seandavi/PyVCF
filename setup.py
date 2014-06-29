@@ -1,6 +1,6 @@
 from setuptools import setup
-from distutils.core import setup
 from distutils.extension import Extension
+import sys
 
 try:
     from Cython.Distutils import build_ext
@@ -8,20 +8,14 @@ try:
 except:
     CYTHON = False
 
-requires = []
+IS_PYTHON26 = sys.version_info[:2] == (2, 6)
 
-# python 2.6 does not have argparse
-try:
-    import argparse
-except ImportError:
-    requires.append('argparse')
+DEPENDENCIES = ['setuptools']
 
+if IS_PYTHON26:
+    DEPENDENCIES.extend(['argparse', 'counter', 'ordereddict',
+                         'unittest2'])
 
-try:
-    import collections
-    collections.OrderedDict
-except AttributeError:
-    requires.append('ordereddict')
 
 # get the version without an import
 VERSION = "Undefined"
@@ -44,14 +38,14 @@ if CYTHON:
 setup(
     name='PyVCF',
     packages=['vcf', 'vcf.test'],
-    scripts=['scripts/vcf_melt', 'scripts/vcf_filter.py'],
+    scripts=['scripts/vcf_melt', 'scripts/vcf_filter.py',
+             'scripts/vcf_sample_filter.py'],
     author='James Casbon and @jdoughertyii',
     author_email='casbon@gmail.com',
     description='Variant Call Format (VCF) parser for Python',
     long_description=DOC,
     test_suite='vcf.test.test_vcf.suite',
-    install_requires=['distribute'],
-    requires=requires,
+    install_requires=DEPENDENCIES,
     entry_points = {
         'vcf.filters': [
             'site_quality = vcf.filters:SiteQuality',
@@ -68,10 +62,18 @@ setup(
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
         'Intended Audience :: Science/Research',
+        'License :: OSI Approved :: BSD License',
+        'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
+        'Programming Language :: Cython',
         'Programming Language :: Python',
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.6'
+        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
-        'Topic :: Scientific/Engineering',
+        'Programming Language :: Python :: 3.2',
+        'Programming Language :: Python :: 3.3',
+        'Topic :: Scientific/Engineering :: Bio-Informatics',
       ],
     keywords='bioinformatics',
     use_2to3=True,

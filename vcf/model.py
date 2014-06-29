@@ -2,6 +2,11 @@ from abc import ABCMeta, abstractmethod
 import collections
 import sys
 
+try:
+    from collections import Counter
+except ImportError:
+    from counter import Counter
+
 
 class _Call(object):
     """ A genotype call, a cell entry in a VCF file"""
@@ -31,9 +36,16 @@ class _Call(object):
         """ Two _Calls are equal if their _Records are equal
             and the samples and ``gt_type``s are the same
         """
-        return (self.site == other.site
-                and self.sample == other.sample
-                and self.gt_type == other.gt_type)
+        return (self.site == getattr(other, "site", None)
+                and self.sample == getattr(other, "sample", None)
+                and self.gt_type == getattr(other, "gt_type", None))
+
+    def __getstate__(self):
+        return dict((attr, getattr(self, attr)) for attr in self.__slots__)
+
+    def __setstate__(self, state):
+        for attr in self.__slots__:
+            setattr(self, attr, state.get(attr))
 
     def gt_phase_char(self):
         return "/" if not self.phased else "|"
@@ -113,10 +125,45 @@ class _Record(object):
         INFO and FORMAT are available as properties.
 
         The list of genotype calls is in the ``samples`` property.
+
+        Regarding the coordinates associated with each instance:
+
+        - ``POS``, per VCF specification, is the one-based index
+          (the first base of the contig has an index of 1) of the first
+          base of the ``REF`` sequence.
+        - The ``start`` and ``end`` denote the coordinates of the entire
+          ``REF`` sequence in the zero-based, half-open coordinate
+          system (see
+          http://genomewiki.ucsc.edu/index.php/Coordinate_Transforms),
+          where the first base of the contig has an index of 0, and the
+          interval runs up to, but does not include, the base at the
+          ``end`` index. This indexing scheme is analagous to Python
+          slice notation.
+        - The ``affected_start`` and ``affected_end`` coordinates are
+          also in the zero-based, half-open coordinate system. These
+          coordinates indicate the precise region of the reference
+          genome actually affected by the events denoted in ``ALT``
+          (i.e., the minimum ``affected_start`` and maximum
+          ``affected_end``).
+
+          - For SNPs and structural variants, the affected region
+            includes all bases of ``REF``, including the first base
+            (i.e., ``affected_start = start = POS - 1``).
+          - For deletions, the region includes all bases of ``REF``
+            except the first base, which flanks upstream the actual
+            deletion event, per VCF specification.
+          - For insertions, the ``affected_start`` and ``affected_end``
+            coordinates represent a 0 bp-length region between the two
+            flanking bases (i.e., ``affected_start`` =
+            ``affected_end``). This is analagous to Python slice
+            notation (see http://stackoverflow.com/a/2947881/38140).
+            Neither the upstream nor downstream flanking bases are
+            included in the region.
     """
     def __init__(self, CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT,
             sample_indexes, samples=None):
         self.CHROM = CHROM
+        #: the one-based coordinate of the first nucleotide in ``REF``
         self.POS = POS
         self.ID = ID
         self.REF = REF
@@ -125,9 +172,9 @@ class _Record(object):
         self.FILTER = FILTER
         self.INFO = INFO
         self.FORMAT = FORMAT
-        #: 0-based start coordinate
+        #: zero-based, half-open start coordinate of ``REF``
         self.start = self.POS - 1
-        #: 1-based end coordinate
+        #: zero-based, half-open end coordinate of ``REF``
         self.end = self.start + len(self.REF)
         #: list of alleles. [0] = REF, [1:] = ALTS
         self.alleles = [self.REF]
@@ -136,12 +183,76 @@ class _Record(object):
         self.samples = samples or []
         self._sample_indexes = sample_indexes
 
+        # Setting affected_start and affected_end here for Sphinx
+        # autodoc purposes...
+        #: zero-based, half-open start coordinate of affected region of reference genome
+        self.affected_start = None
+        #: zero-based, half-open end coordinate of affected region of reference genome (not included in the region)
+        self.affected_end = None
+        self._set_start_and_end()
+
+
+    def _set_start_and_end(self):
+        self.affected_start = self.affected_end = self.POS
+        for alt in self.ALT:
+            if alt is None:
+                start, end = self._compute_coordinates_for_none_alt()
+            elif alt.type == 'SNV':
+                start, end = self._compute_coordinates_for_snp()
+            elif alt.type == 'MNV':
+                start, end = self._compute_coordinates_for_indel()
+            else:
+                start, end = self._compute_coordinates_for_sv()
+            self.affected_start = min(self.affected_start, start)
+            self.affected_end = max(self.affected_end, end)
+
+
+    def _compute_coordinates_for_none_alt(self):
+        start = self.POS - 1
+        end = start + len(self.REF)
+        return (start, end)
+
+
+    def _compute_coordinates_for_snp(self):
+        if len(self.REF) > 1:
+            start = self.POS
+            end = start + (len(self.REF) - 1)
+        else:
+            start = self.POS - 1
+            end = self.POS
+        return (start, end)
+
+
+    def _compute_coordinates_for_indel(self):
+        if len(self.REF) > 1:
+            start = self.POS
+            end = start + (len(self.REF) - 1)
+        else:
+            start = end = self.POS
+        return (start, end)
+
+
+    def _compute_coordinates_for_sv(self):
+        start = self.POS - 1
+        end = start + len(self.REF)
+        return (start, end)
+
+
+    # For Python 2
+    def __cmp__(self, other):
+        return cmp((self.CHROM, self.POS), (getattr(other, "CHROM", None), getattr(other, "POS", None)))
+
+    # For Python 3
     def __eq__(self, other):
         """ _Records are equal if they describe the same variant (same position, alleles) """
-        return (self.CHROM == other.CHROM and
-                self.POS == other.POS and
-                self.REF == other.REF and
-                self.ALT == other.ALT)
+        return (self.CHROM == getattr(other, "CHROM", None) and
+                self.POS == getattr(other, "POS", None) and
+                self.REF == getattr(other, "REF", None) and
+                self.ALT == getattr(other, "ALT", None))
+
+    # For Python 3
+    def __lt__(self, other):
+        return (self.CHROM, self.POS) < (getattr(other, "CHROM", None), getattr(other, "POS", None))
 
     def __iter__(self):
         return iter(self.samples)
@@ -149,14 +260,14 @@ class _Record(object):
     def __str__(self):
         return "Record(CHROM=%(CHROM)s, POS=%(POS)s, REF=%(REF)s, ALT=%(ALT)s)" % self.__dict__
 
-    def __cmp__(self, other):
-        return cmp((self.CHROM, self.POS), (other.CHROM, other.POS))
-
     def add_format(self, fmt):
         self.FORMAT = self.FORMAT + ':' + fmt
 
     def add_filter(self, flt):
-        self.FILTER.append(flt)
+        if self.FILTER is None:
+            self.FILTER = [flt]
+        else:
+            self.FILTER.append(flt)
 
     def add_info(self, info, value=True):
         self.INFO[info] = value
@@ -197,17 +308,17 @@ class _Record(object):
 
     @property
     def aaf(self):
-        """ The allele frequency of the alternate allele.
-           NOTE 1: Punt if more than one alternate allele.
-           NOTE 2: Denominator calc'ed from _called_ genotypes.
+        """ A list of allele frequencies of alternate alleles.
+           NOTE: Denominator calc'ed from _called_ genotypes.
         """
-        # skip if more than one alternate allele. assumes bi-allelic
-        if len(self.ALT) > 1:
-            return None
-        het = self.num_het
-        hom_alt = self.num_hom_alt
-        num_chroms = float(2.0 * self.num_called)
-        return float(het + 2 * hom_alt) / float(num_chroms)
+        num_chroms = 0.0
+        allele_counts = Counter()
+        for s in self.samples:
+            if s.gt_type is not None:
+                for a in s.gt_alleles:
+                    allele_counts.update([a])
+                    num_chroms += 1
+        return [allele_counts[str(i)]/num_chroms for i in range(1, len(self.ALT)+1)]
 
     @property
     def nucl_diversity(self):
@@ -224,10 +335,22 @@ class _Record(object):
         # skip if more than one alternate allele. assumes bi-allelic
         if len(self.ALT) > 1:
             return None
-        p = self.aaf
+        p = self.aaf[0]
         q = 1.0 - p
         num_chroms = float(2.0 * self.num_called)
         return float(num_chroms / (num_chroms - 1.0)) * (2.0 * p * q)
+
+    @property
+    def heterozygosity(self):
+        """
+        Heterozygosity of a site. Heterozygosity gives the probability that
+        two randomly chosen chromosomes from the population have different
+        alleles, giving a measure of the degree of polymorphism in a population.
+
+        If there are i alleles with frequency p_i, H=1-sum_i(p_i^2)
+        """
+        allele_freqs = [1-sum(self.aaf)] + self.aaf
+        return 1 - sum(map(lambda x: x**2, allele_freqs))
 
     def get_hom_refs(self):
         """ The list of hom ref genotypes"""
@@ -427,7 +550,7 @@ class _AltRecord(object):
         raise NotImplementedError
 
     def __eq__(self, other):
-        return self.type == other.type
+        return self.type == getattr(other, 'type', None)
 
 
 class _Substitution(_AltRecord):
@@ -453,8 +576,9 @@ class _Substitution(_AltRecord):
     def __eq__(self, other):
         if isinstance(other, basestring):
             return self.sequence == other
-        else:
-            return super(_Substitution, self).__eq__(other) and self.sequence == other.sequence
+        elif not isinstance(other, self.__class__):
+            return False
+        return super(_Substitution, self).__eq__(other) and self.sequence == other.sequence
 
 
 class _Breakend(_AltRecord):
@@ -463,9 +587,15 @@ class _Breakend(_AltRecord):
     def __init__(self, chr, pos, orientation, remoteOrientation, connectingSequence, withinMainAssembly, **kwargs):
         super(_Breakend, self).__init__(type="BND", **kwargs)
         #: The chromosome of breakend's mate.
-        self.chr = str(chr)
+        if chr is not None:
+            self.chr = str(chr)
+        else:
+            self.chr = None  # Single breakend
         #: The coordinate of breakend's mate.
-        self.pos = int(pos)
+        if pos is not None:
+            self.pos = int(pos)
+        else:
+            self.pos = None
         #: The orientation of breakend's mate. If the sequence 3' of the breakend's mate is connected, True, else if the sequence 5' of the breakend's mate is connected, False.
         self.remoteOrientation = remoteOrientation
         #: If the breakend mate is within the assembly, True, else False if the breakend mate is on a contig in an ancillary assembly file.
@@ -497,13 +627,15 @@ class _Breakend(_AltRecord):
             return self.connectingSequence + remoteTag
 
     def __eq__(self, other):
+        if not isinstance(other, self.__class__):
+            return False
         return super(_Breakend, self).__eq__(other) \
-                and self.chr == other.chr \
-                and self.pos == other.pos \
-                and self.remoteOrientation == other.remoteOrientation \
-                and self.withinMainAssembly == other.withinMainAssembly \
-                and self.orientation == other.orientation \
-                and self.connectingSequence == other.connectingSequence
+                and self.chr == getattr(other, "chr", None) \
+                and self.pos == getattr(other, "pos", None) \
+                and self.remoteOrientation == getattr(other, "remoteOrientation", None) \
+                and self.withinMainAssembly == getattr(other, "withinMainAssembly", None) \
+                and self.orientation == getattr(other, "orientation", None) \
+                and self.connectingSequence == getattr(other, "connectingSequence", None)
 
 
 class _SingleBreakend(_Breakend):
@@ -539,5 +671,9 @@ def make_calldata_tuple(fields):
             dat = ", ".join(["%s=%s" % (x, y)
                 for (x, y) in zip(self._fields, self)])
             return "CallData(" + dat + ')'
+
+        def __reduce__(self):
+            args = super(CallData, self).__reduce__()
+            return make_calldata_tuple, (fields, )
 
     return CallData
