@@ -1,33 +1,39 @@
 from abc import ABCMeta, abstractmethod
 import collections
 import sys
+import re
 
 try:
     from collections import Counter
 except ImportError:
     from counter import Counter
 
+allele_delimiter = re.compile(r'''[|/]''') # to split a genotype into alleles
 
 class _Call(object):
     """ A genotype call, a cell entry in a VCF file"""
 
-    __slots__ = ['site', 'sample', 'data', 'gt_nums', 'called']
+    __slots__ = ['site', 'sample', 'data', 'gt_nums', 'gt_alleles', 'called', 'ploidity']
 
     def __init__(self, site, sample, data):
         #: The ``_Record`` for this ``_Call``
         self.site = site
         #: The sample name
         self.sample = sample
-        #: Dictionary of data from the VCF file
+        #: Namedtuple of data from the VCF file
         self.data = data
-        try:
-            self.gt_nums = self.data.GT
-            #: True if the GT is not ./.
-            self.called = self.gt_nums is not None
-        except AttributeError:
-            self.gt_nums = None
+
+        if getattr(self.data, 'GT', None) is not None:
+            self.gt_alleles = [(al if al != '.' else None) for al in allele_delimiter.split(self.data.GT)]
+            self.ploidity = len(self.gt_alleles)
+            self.called = all([al != None for al in self.gt_alleles])
+            self.gt_nums = self.data.GT if self.called else None
+        else:
             #62 a call without a genotype is not defined as called or not
+            self.gt_alleles = None
+            self.ploidity = None
             self.called = None
+            self.gt_nums = None
 
     def __repr__(self):
         return "Call(sample=%s, %s)" % (self.sample, str(self.data))
@@ -49,12 +55,6 @@ class _Call(object):
 
     def gt_phase_char(self):
         return "/" if not self.phased else "|"
-
-    @property
-    def gt_alleles(self):
-        '''The numbers of the alleles called at a given sample'''
-        # grab the numeric alleles of the gt string; tokenize by phasing
-        return self.gt_nums.split(self.gt_phase_char())
 
     @property
     def gt_bases(self):
@@ -116,6 +116,18 @@ class _Call(object):
         if not self.called:
             return None
         return self.gt_type == 1
+
+    @property
+    def is_filtered(self):
+        """ Return True for filtered calls """
+        try: # no FT annotation present for this variant
+            filt = self.data.FT
+        except AttributeError:
+            return False
+        if filt is None or len(filt) == 0: # FT is not set or set to PASS
+            return False
+        else:
+            return True
 
 
 class _Record(object):
@@ -279,7 +291,7 @@ class _Record(object):
     @property
     def num_called(self):
         """ The number of called samples"""
-        return sum(s.called for s in self.samples)
+        return sum(1 for s in self.samples if s.called)
 
     @property
     def call_rate(self):
@@ -330,7 +342,7 @@ class _Record(object):
 
         Derived from:
         \"Population Genetics: A Concise Guide, 2nd ed., p.45\"
-          John Gillespie.
+        John Gillespie.
         """
         # skip if more than one alternate allele. assumes bi-allelic
         if len(self.ALT) > 1:
@@ -376,7 +388,7 @@ class _Record(object):
         for alt in self.ALT:
             if alt is None or alt.type != "SNV":
                 return False
-            if alt not in ['A', 'C', 'G', 'T']:
+            if alt not in ['A', 'C', 'G', 'T', 'N', '*']:
                 return False
         return True
 
@@ -467,13 +479,14 @@ class _Record(object):
     def var_subtype(self):
         """
         Return the subtype of variant.
+
         - For SNPs and INDELs, yeild one of: [ts, tv, ins, del]
-        - For SVs yield either "complex" or the SV type defined
-          in the ALT fields (removing the brackets).
-          E.g.:
-               <DEL>       -> DEL
-               <INS:ME:L1> -> INS:ME:L1
-               <DUP>       -> DUP
+        - For SVs yield either "complex" or the SV type defined in the ALT
+          fields (removing the brackets). E.g.::
+
+              <DEL>       -> DEL
+              <INS:ME:L1> -> INS:ME:L1
+              <DUP>       -> DUP
 
         The logic is meant to follow the rules outlined in the following
         paragraph at:
@@ -534,6 +547,15 @@ class _Record(object):
     def is_monomorphic(self):
         """ Return True for reference calls """
         return len(self.ALT) == 1 and self.ALT[0] is None
+
+    @property
+    def is_filtered(self):
+        """ Return True if a variant has been filtered """
+        filt = self.FILTER
+        if filt is None or len(filt) == 0: # FILTER is not set or set to PASS
+            return False
+        else:
+            return True
 
 
 class _AltRecord(object):

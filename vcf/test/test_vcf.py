@@ -114,6 +114,37 @@ class TestVcfSpecs(unittest.TestCase):
                 print(c)
                 assert c
 
+    def test_vcf_4_2(self):
+        reader = vcf.Reader(fh('example-4.2.vcf'))
+        self.assertEqual(reader.metadata['fileformat'],  'VCFv4.2')
+
+        # If INFO contains no Source and Version keys, they should be None.
+        self.assertEqual(reader.infos['DP'].source, None)
+        self.assertEqual(reader.infos['DP'].version, None)
+
+        # According to spec, INFO Version key is required to be double quoted,
+        # but at least SAMtools 1.0 does not quote it. So we want to be
+        # forgiving here.
+        self.assertEqual(reader.infos['VDB'].source, None)
+        self.assertEqual(reader.infos['VDB'].version, '3')
+
+        # test we can walk the file at least
+        for r in reader:
+            for c in r:
+                assert c
+
+    def test_contig_idonly(self):
+        """Test VCF inputs with ##contig inputs containing only IDs. produced by bcftools 1.2+
+        """
+        reader = vcf.Reader(fh("contig_idonly.vcf"))
+        for cid, contig in reader.contigs.items():
+            if cid == "1":
+                assert contig.length is None
+            elif cid == "2":
+                assert contig.length == 2000
+            elif cid == "3":
+                assert contig.length == 3000
+
 class TestGatkOutput(unittest.TestCase):
 
     filename = 'gatk.vcf'
@@ -198,6 +229,34 @@ class TestBcfToolsOutput(unittest.TestCase):
             for s in r.samples:
                 s.phased
 
+class TestIssue214(unittest.TestCase):
+    """ See https://github.com/jamescasbon/PyVCF/issues/214 """
+
+    def test_issue_214_is_snp(self):
+        reader=vcf.Reader(fh('issue-214.vcf'))
+        r=next(reader)
+        self.assertTrue(r.is_snp)
+
+    def test_issue_214_var_type(self):
+        reader=vcf.Reader(fh('issue-214.vcf'))
+        r=next(reader)
+        self.assertEqual(r.var_type,'snp')
+
+    # Can the ref even be a spanning deletion?
+    # Note, this does not trigger issue 214, but I've added it here for completeness
+    def test_issue_214_ref_is_del_is_snp(self):
+        reader=vcf.Reader(fh('issue-214.vcf'))
+        next(reader)
+        r=next(reader)
+        self.assertTrue(r.is_snp)
+
+    # Can the ref even be a spanning deletion?
+    # Note, this does not trigger issue 214, but I've added it here for completeness
+    def test_issue_214_ref_is_del_var_type(self):
+        reader=vcf.Reader(fh('issue-214.vcf'))
+        next(reader)
+        r=next(reader)
+        self.assertEqual(r.var_type,'snp')
 
 class Test1kg(unittest.TestCase):
 
@@ -334,6 +393,38 @@ class TestInfoTypeCharacter(unittest.TestCase):
             self.assertEquals(l.INFO, r.INFO)
 
 
+class TestParseMetaLine(unittest.TestCase):
+    def test_parse(self):
+        reader = vcf.Reader(fh('parse-meta-line.vcf'))
+        f = reader.metadata['MYFIELD'][0]
+        self.assertEqual(f['ID'], 'SomeField')
+        self.assertEqual(f['Version'], '3.4-0-g7e26428')
+        self.assertEqual(f['Date'], '"Wed Oct 07 09:11:47 CEST 2015"')
+        self.assertEqual(f['Options'], '"< 4 and > 3"')
+        next(reader)
+
+    def test_write(self):
+        reader = vcf.Reader(fh('parse-meta-line.vcf'))
+        out = StringIO()
+        writer = vcf.Writer(out, reader)
+
+        records = list(reader)
+
+        for record in records:
+            writer.write_record(record)
+        out.seek(0)
+        reader2 = vcf.Reader(out)
+
+        f = reader2.metadata['MYFIELD'][0]
+        self.assertEqual(f['ID'], 'SomeField')
+        self.assertEqual(f['Version'], '3.4-0-g7e26428')
+        self.assertEqual(f['Date'], '"Wed Oct 07 09:11:47 CEST 2015"')
+        self.assertEqual(f['Options'], '"< 4 and > 3"')
+
+        for l, r in zip(records, reader2):
+            self.assertEquals(l.INFO, r.INFO)
+
+
 class TestGatkOutputWriter(unittest.TestCase):
 
     def testWrite(self):
@@ -426,6 +517,27 @@ class TestSamplesSpace(unittest.TestCase):
         self.assertEqual(self.reader.samples, self.samples)
 
 
+class TestMetadataWhitespace(unittest.TestCase):
+    filename = 'metadata-whitespace.vcf'
+    def test_metadata_whitespace(self):
+        """
+        Test parsing metadata header lines with whitespace.
+        """
+        self.reader = vcf.Reader(fh(self.filename))
+
+        # Pick one INFO line and assert that we parsed it correctly.
+        info_indel = self.reader.infos['INDEL']
+        assert info_indel.id == 'INDEL'
+        assert info_indel.num == 0
+        assert info_indel.type == 'Flag'
+        assert info_indel.desc == 'Indicates that the variant is an INDEL.'
+
+        # Test we can walk the file at least.
+        for r in self.reader:
+            for c in r:
+                pass
+
+
 class TestMixedFiltering(unittest.TestCase):
     filename = 'mixed-filtering.vcf'
     def test_mixed_filtering(self):
@@ -450,7 +562,7 @@ class TestRecord(unittest.TestCase):
             self.assertEqual(len(var.samples), num_calls)
 
     def test_dunder_eq(self):
-        rec = vcf.Reader(fh('example-4.0.vcf')).next()
+        rec = next(vcf.Reader(fh('example-4.0.vcf')))
         self.assertFalse(rec == None)
         self.assertFalse(None == rec)
 
@@ -540,6 +652,24 @@ class TestRecord(unittest.TestCase):
                 self.assertEqual(False, is_snp)
             elif var.POS == 1234567:
                 self.assertEqual(False, is_snp)
+
+
+    def test_is_snp_for_n_alt(self):
+        record = model._Record(
+                '1',
+                10,
+                'id1',
+                'C',
+                [model._Substitution('N')],
+                None,
+                None,
+                {},
+                None,
+                {},
+                None
+        )
+        self.assertTrue(record.is_snp)
+
 
     def test_is_indel(self):
         reader = vcf.Reader(fh('example-4.0.vcf'))
@@ -762,7 +892,7 @@ class TestRecord(unittest.TestCase):
 
     def test_info_multiple_values(self):
         reader = vcf.Reader(fh('example-4.1-info-multiple-values.vcf'))
-        var = reader.next()
+        var = next(reader)
         # check Float type INFO field with multiple values
         expected = [19.3, 47.4, 14.0]
         actual = var.INFO['RepeatCopies']
@@ -1019,7 +1149,7 @@ class TestCall(unittest.TestCase):
 
     def test_dunder_eq(self):
         reader = vcf.Reader(fh('example-4.0.vcf'))
-        var = reader.next()
+        var = next(reader)
         example_call = var.samples[0]
         self.assertFalse(example_call == None)
         self.assertFalse(None == example_call)
@@ -1122,6 +1252,108 @@ class TestFetch(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(pysam, "test requires installation of PySAM.")
+class TestIssue201(unittest.TestCase):
+    def setUp(self):
+        # This file contains some non-ASCII characters in a UTF-8 encoding.
+        # https://github.com/jamescasbon/PyVCF/issues/201
+        self.reader = vcf.Reader(fh('issue-201.vcf.gz', 'rb'),
+                                 encoding='utf-8')
+
+    def testIterate(self):
+        for record in self.reader:
+            # Should not raise decoding errors.
+            pass
+
+    def testFetch(self):
+        for record in self.reader.fetch(chrom='17'):
+            # Should not raise decoding errors.
+            pass
+
+
+class TestIssue234(unittest.TestCase):
+    """ See https://github.com/jamescasbon/PyVCF/issues/234 """
+
+    def test_vcf_metadata_parser_doesnt_break_with_empty_number_tags(self):
+        parser = vcf.parser._vcf_metadata_parser()
+        num_str = '##INFO=<ID=CA,Number=,Type=Flag,Description="Position '
+        num_str += 'could not be annotated to a coding region of a transcript '
+        num_str += 'using the supplied bed file">'
+        try:
+            info = parser.read_info(num_str)[1]
+            self.assertIsNone(info.num)
+        except SyntaxError:
+            msg = "vcf.parser._vcf_metadata_parser shouldn't raise SyntaxError"
+            msg += " if Number tag is empty."
+            self.fail(msg)
+
+
+class TestIssue246(unittest.TestCase):
+    """ See https://github.com/jamescasbon/PyVCF/issues/246 """
+
+    def test_FT_pass_two(self):
+        reader=vcf.Reader(fh('FT.vcf'))
+        next(reader)
+        r=next(reader)
+        target=[
+            [],
+            ['DP125','DP130'],
+            ['DP125','DP130'],
+            ['DP125','DP130'],
+            ['DP125','DP130']
+        ]
+        result=[call.data.FT for call in r.samples]
+        self.assertEqual(target,result)
+
+    def test_FT_one_two(self):
+        reader=list(vcf.Reader(fh('FT.vcf')))
+        r=reader[6]
+        target=[
+            ['DP125','DP130'],
+            ['DP125','DP130'],
+            ['DP125','DP130'],
+            ['DP130'],
+            ['DP125','DP130']
+        ]
+        result=[call.data.FT for call in r.samples]
+        self.assertEqual(target,result)
+            
+
+class TestIsFiltered(unittest.TestCase):
+    """ Test is_filtered property for _Call and _Record """
+
+    def test_is_filt_record(self):
+        reader = vcf.Reader(fh('FT.vcf'))
+        target = [
+            False, False, True, False, False,
+            False, True, False, False, False
+        ]
+        result = [record.is_filtered for record in reader]
+        self.assertEqual(target,result)
+
+    def test_is_filt_call_unset(self):
+        reader = vcf.Reader(fh('FT.vcf'))
+        record = next(reader)
+        target = [False]*5
+        result = [call.is_filtered for call in record]
+        self.assertEqual(target,result)
+
+    def test_is_filt_call_pass_two(self):
+        reader = vcf.Reader(fh('FT.vcf'))
+        next(reader)
+        record = next(reader)
+        target = [False, True, True, True, True]
+        result = [call.is_filtered for call in record]
+        self.assertEqual(target,result)
+
+    def test_is_filt_call_one(self):
+        reader = list(vcf.Reader(fh('FT.vcf')))
+        record = reader[6]
+        target = [True]*5
+        result = [call.is_filtered for call in record]
+        self.assertEqual(target,result)
+
+
 class TestOpenMethods(unittest.TestCase):
 
     samples = 'NA00001 NA00002 NA00003'.split()
@@ -1171,7 +1403,7 @@ class TestSampleFilter(unittest.TestCase):
         #print(buf.getvalue())
         reader = vcf.Reader(buf)
         self.assertEqual(reader.samples, ['NA00001'])
-        rec = reader.next()
+        rec = next(reader)
         self.assertEqual(len(rec.samples), 1)
 
     @unittest.skipUnless(IS_NOT_PYPY, "test broken for PyPy")
@@ -1193,7 +1425,7 @@ class TestSampleFilter(unittest.TestCase):
         # read output
         reader = vcf.Reader(buf)
         self.assertEqual(reader.samples, ['NA00001'])
-        rec = reader.next()
+        rec = next(reader)
         self.assertEqual(len(rec.samples), 1)
 
 
@@ -1252,7 +1484,7 @@ class TestRegression(unittest.TestCase):
 
     def test_issue_16(self):
         reader = vcf.Reader(fh('issue-16.vcf'))
-        n = reader.next()
+        n = next(reader)
         assert n.QUAL == None
 
     def test_null_mono(self):
@@ -1267,7 +1499,7 @@ class TestRegression(unittest.TestCase):
         out.seek(0)
         print(out.getvalue())
         p2 = vcf.Reader(out)
-        rec = p2.next()
+        rec = next(p2)
         assert rec.samples
 
 
@@ -1341,28 +1573,108 @@ class TestGATKMeta(unittest.TestCase):
         self.assertEqual(reader.metadata['GATKCommandLine'][1]['CommandLineOptions'], '"analysis_type=VariantAnnotator annotation=[HomopolymerRun, VariantType, TandemRepeatAnnotator]"')
 
 
+
+class TestUncalledGenotypes(unittest.TestCase):
+    """Test the handling of uncalled (., ./.) sample genotypes."""
+
+    def test_read_uncalled(self):
+        """Test that uncalled genotypes are properly read into
+        gt_nums, gt_bases, ploidity, and gt_alleles properties
+        of _Call objects.  For uncalled _Call objects:
+
+        - gt_nums should be None
+        - gt_bases should be None
+        - ploidity should match the input ploidity
+        - gt_alleles should be a list of None's with length
+          matching the ploidity"""
+
+        reader = vcf.Reader(fh('uncalled_genotypes.vcf'))
+        for var in reader:
+            gt_bases = [s.gt_bases for s in var.samples]
+            gt_nums = [s.gt_nums for s in var.samples]
+            ploidity = [s.ploidity for s in var.samples]
+            gt_alleles = [s.gt_alleles for s in var.samples]
+
+            if var.POS == 14370:
+                self.assertEqual(['0|0', None, '1/1'], gt_nums)
+                self.assertEqual(['G|G', None, 'A/A'], gt_bases)
+                self.assertEqual([2,2,2], ploidity)
+                self.assertEqual([['0','0'], [None,None], ['1','1']], gt_alleles)
+            elif var.POS == 17330:
+                self.assertEqual([None, '0|1', '0/0'], gt_nums)
+                self.assertEqual([None, 'T|A', 'T/T'], gt_bases)
+                self.assertEqual([3,2,2], ploidity)
+                self.assertEqual([[None,None,None], ['0','1'], ['0','0']], gt_alleles)
+            elif var.POS == 1234567:
+                self.assertEqual(['0/1', '0/2', None], gt_nums)
+                self.assertEqual(['GTC/G', 'GTC/GTCT', None], gt_bases)
+                self.assertEqual([2,2,1], ploidity)
+                self.assertEqual([['0','1'], ['0','2'], [None]], gt_alleles)
+        reader._reader.close()
+
+
+    def test_write_uncalled(self):
+        """Test that uncalled genotypes are written just as
+        they were read in the input file."""
+
+        reader = vcf.Reader(fh('uncalled_genotypes.vcf'))
+
+        # Write all reader records to a stream.
+        out = StringIO()
+        writer = vcf.Writer(out, reader, lineterminator='\n')
+        for record in reader:
+            writer.write_record(record)
+        reader._reader.close()
+
+
+        # Compare the written stream to the input reader line-by-line.
+        out.seek(0)
+        out_lines = out.getvalue().split('\n')
+        in_file = fh('uncalled_genotypes.vcf')
+        in_lines = [l.rstrip('\n') for l in in_file]
+        in_file.close()
+        for (in_line, out_line) in zip(in_lines, out_lines):
+            self.assertEqual(in_line,out_line)
+
+class TestStrelka(unittest.TestCase):
+
+    def test_strelka(self):
+        reader = vcf.Reader(fh('strelka.vcf'))
+        n = next(reader)
+        assert n is not None
+
+
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestVcfSpecs))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestGatkOutput))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestFreebayesOutput))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestSamtoolsOutput))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestBcfToolsOutput))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestIssue214))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(Test1kg))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(Test1kgSites))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestGoNL))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestStringAsFlag))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestInfoOrder))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestInfoTypeCharacter))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestParseMetaLine))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestGatkOutputWriter))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestBcfToolsOutputWriter))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestWriterDictionaryMeta))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestSamplesSpace))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestMetadataWhitespace))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestMixedFiltering))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestRecord))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestCall))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestFetch))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestIssue201))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestIssue234))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestIssue246))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestIsFiltered))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestOpenMethods))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestSampleFilter))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestFilter))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestRegression))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestUtils))
 suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestGATKMeta))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestUncalledGenotypes))
+suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestStrelka))

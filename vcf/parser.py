@@ -63,12 +63,13 @@ SINGULAR_METADATA = ['fileformat', 'fileDate', 'reference']
 # Conversion between value in file and Python value
 field_counts = {
     '.': None,  # Unknown number of values
-    'A': -1,  # Equal to the number of alleles in a given record
+    'A': -1,  # Equal to the number of alternate alleles in a given record
     'G': -2,  # Equal to the number of genotypes in a given record
+    'R': -3,  # Equal to the number of alleles including reference in a given record
 }
 
 
-_Info = collections.namedtuple('Info', ['id', 'num', 'type', 'desc'])
+_Info = collections.namedtuple('Info', ['id', 'num', 'type', 'desc', 'source', 'version'])
 _Filter = collections.namedtuple('Filter', ['id', 'desc'])
 _Alt = collections.namedtuple('Alt', ['id', 'desc'])
 _Format = collections.namedtuple('Format', ['id', 'num', 'type', 'desc'])
@@ -77,40 +78,43 @@ _Contig = collections.namedtuple('Contig', ['id', 'length'])
 
 
 class _vcf_metadata_parser(object):
-    '''Parse the metadat in the header of a VCF file.'''
+    '''Parse the metadata in the header of a VCF file.'''
     def __init__(self):
         super(_vcf_metadata_parser, self).__init__()
         self.info_pattern = re.compile(r'''\#\#INFO=<
-            ID=(?P<id>[^,]+),
-            Number=(?P<number>-?\d+|\.|[AG]),
-            Type=(?P<type>Integer|Float|Flag|Character|String),
+            ID=(?P<id>[^,]+),\s*
+            Number=(?P<number>-?\d+|\.|[AGR])?,\s*
+            Type=(?P<type>Integer|Float|Flag|Character|String),\s*
             Description="(?P<desc>[^"]*)"
+            (?:,\s*Source="(?P<source>[^"]*)")?
+            (?:,\s*Version="?(?P<version>[^"]*)"?)?
             >''', re.VERBOSE)
         self.filter_pattern = re.compile(r'''\#\#FILTER=<
-            ID=(?P<id>[^,]+),
+            ID=(?P<id>[^,]+),\s*
             Description="(?P<desc>[^"]*)"
             >''', re.VERBOSE)
         self.alt_pattern = re.compile(r'''\#\#ALT=<
-            ID=(?P<id>[^,]+),
+            ID=(?P<id>[^,]+),\s*
             Description="(?P<desc>[^"]*)"
             >''', re.VERBOSE)
         self.format_pattern = re.compile(r'''\#\#FORMAT=<
-            ID=(?P<id>.+),
-            Number=(?P<number>-?\d+|\.|[AG]),
-            Type=(?P<type>.+),
+            ID=(?P<id>.+),\s*
+            Number=(?P<number>-?\d+|\.|[AGR]),\s*
+            Type=(?P<type>.+),\s*
             Description="(?P<desc>.*)"
             >''', re.VERBOSE)
         self.contig_pattern = re.compile(r'''\#\#contig=<
-            ID=(?P<id>[^,]+),
-            .*
-            length=(?P<length>-?\d+)
+            ID=(?P<id>[^>,]+)
+            (,.*length=(?P<length>-?\d+))?
             .*
             >''', re.VERBOSE)
         self.meta_pattern = re.compile(r'''##(?P<key>\w+?)=(?P<val>.+)''')
 
     def vcf_field_count(self, num_str):
         """Cast vcf header numbers to integer or None"""
-        if num_str not in field_counts:
+        if num_str is None:
+            return None
+        elif num_str not in field_counts:
             # Fixed, specified number
             return int(num_str)
         else:
@@ -126,7 +130,8 @@ class _vcf_metadata_parser(object):
         num = self.vcf_field_count(match.group('number'))
 
         info = _Info(match.group('id'), num,
-                     match.group('type'), match.group('desc'))
+                     match.group('type'), match.group('desc'),
+                     match.group('source'), match.group('version'))
 
         return (match.group('id'), info)
 
@@ -146,7 +151,7 @@ class _vcf_metadata_parser(object):
         match = self.alt_pattern.match(alt_string)
         if not match:
             raise SyntaxError(
-                "One of the FILTER lines is malformed: %s" % alt_string)
+                "One of the ALT lines is malformed: %s" % alt_string)
 
         alt = _Alt(match.group('id'), match.group('desc'))
 
@@ -172,24 +177,21 @@ class _vcf_metadata_parser(object):
         if not match:
             raise SyntaxError(
                 "One of the contig lines is malformed: %s" % contig_string)
-
         length = self.vcf_field_count(match.group('length'))
-
         contig = _Contig(match.group('id'), length)
-
         return (match.group('id'), contig)
 
-
     def read_meta_hash(self, meta_string):
-        items = re.split("[<>]", meta_string)
-        # Removing initial hash marks and final equal sign
-        key = items[0][2:-1]
+        # assert re.match("##.+=<", meta_string)
+        items = meta_string.split('=', 1)
+        # Removing initial hash marks
+        key = items[0].lstrip('#')
         # N.B., items can have quoted values, so cannot just split on comma
         val = OrderedDict()
         state = 0
         k = ''
         v = ''
-        for c in items[1]:
+        for c in items[1].strip('[<>]'):
 
             if state == 0:  # reading item key
                 if c == '=':
@@ -220,16 +222,20 @@ class _vcf_metadata_parser(object):
     def read_meta(self, meta_string):
         if re.match("##.+=<", meta_string):
             return self.read_meta_hash(meta_string)
-        else:
-            match = self.meta_pattern.match(meta_string)
-            return match.group('key'), match.group('val')
+        match = self.meta_pattern.match(meta_string)
+        if not match:
+            # Spec only allows key=value, but we try to be liberal and
+            # interpret anything else as key=none (and all values are parsed
+            # as strings).
+            return meta_string.lstrip('#'), 'none'
+        return match.group('key'), match.group('val')
 
 
 class Reader(object):
     """ Reader for a VCF v 4.0 file, an iterator returning ``_Record objects`` """
 
-    def __init__(self, fsock=None, filename=None, compressed=False, prepend_chr=False,
-                 strict_whitespace=False):
+    def __init__(self, fsock=None, filename=None, compressed=None, prepend_chr=False,
+                 strict_whitespace=False, encoding='ascii'):
         """ Create a new Reader for a VCF file.
 
             You must specify either fsock (stream) or filename.  Gzipped streams
@@ -251,20 +257,25 @@ class Reader(object):
             self._reader = fsock
             if filename is None and hasattr(fsock, 'name'):
                 filename = fsock.name
-                compressed = compressed or filename.endswith('.gz')
+                if compressed is None:
+                    compressed = filename.endswith('.gz')
         elif filename:
-            compressed = compressed or filename.endswith('.gz')
+            if compressed is None:
+                compressed = filename.endswith('.gz')
             self._reader = open(filename, 'rb' if compressed else 'rt')
         self.filename = filename
         if compressed:
             self._reader = gzip.GzipFile(fileobj=self._reader)
             if sys.version > '3':
-                self._reader = codecs.getreader('ascii')(self._reader)
+                self._reader = codecs.getreader(encoding)(self._reader)
 
         if strict_whitespace:
             self._separator = '\t'
         else:
             self._separator = '\t| +'
+
+        self._row_pattern = re.compile(self._separator)
+        self._alt_pattern = re.compile('[\[\]]')
 
         self.reader = (line.strip() for line in self._reader if line.strip())
 
@@ -288,6 +299,7 @@ class Reader(object):
         self._prepend_chr = prepend_chr
         self._parse_metainfo()
         self._format_cache = {}
+        self.encoding = encoding
 
     def __iter__(self):
         return self
@@ -302,7 +314,7 @@ class Reader(object):
 
         parser = _vcf_metadata_parser()
 
-        line = self.reader.next()
+        line = next(self.reader)
         while line.startswith('##'):
             self._header_lines.append(line)
 
@@ -335,9 +347,9 @@ class Reader(object):
                         self.metadata[key] = []
                     self.metadata[key].append(val)
 
-            line = self.reader.next()
+            line = next(self.reader)
 
-        fields = re.split(self._separator, line[1:])
+        fields = self._row_pattern.split(line[1:])
         self._column_headers = fields[:9]
         self.samples = fields[9:]
         self._sample_indexes = dict([(x,i) for (i,x) in enumerate(self.samples)])
@@ -346,6 +358,19 @@ class Reader(object):
         '''``map``, but make bad values None.'''
         return [func(x) if x != bad else None
                 for x in iterable]
+
+    def _parse_filter(self, filt_str):
+        '''Parse the FILTER field of a VCF entry into a Python list
+
+        NOTE: this method has a cython equivalent and care must be taken
+        to keep the two methods equivalent
+        '''
+        if filt_str == '.':
+            return None
+        elif filt_str == 'PASS':
+            return []
+        else:
+            return filt_str.split(';')
 
     def _parse_info(self, info_str):
         '''Parse the INFO field of a VCF entry into a dictionary of Python
@@ -359,7 +384,7 @@ class Reader(object):
         retdict = {}
 
         for entry in entries:
-            entry = entry.split('=')
+            entry = entry.split('=', 1)
             ID = entry[0]
             try:
                 entry_type = self.infos[ID].type
@@ -457,7 +482,14 @@ class Reader(object):
             for i, vals in enumerate(sample.split(':')):
 
                 # short circuit the most common
-                if vals == '.' or vals == './.':
+                if samp_fmt._fields[i] == 'GT':
+                    sampdat[i] = vals
+                    continue
+                # genotype filters are a special case
+                elif samp_fmt._fields[i] == 'FT':
+                    sampdat[i] = self._parse_filter(vals)
+                    continue
+                elif not vals or vals == ".":
                     sampdat[i] = None
                     continue
 
@@ -501,9 +533,9 @@ class Reader(object):
         return samp_data
 
     def _parse_alt(self, str):
-        if re.search('[\[\]]', str) is not None:
+        if self._alt_pattern.search(str) is not None:
             # Paired breakend
-            items = re.split('[\[\]]', str)
+            items = self._alt_pattern.split(str)
             remoteCoords = items[1].split(':')
             chr = remoteCoords[0]
             if chr[0] == '<':
@@ -530,8 +562,8 @@ class Reader(object):
 
     def next(self):
         '''Return the next record in the file.'''
-        line = self.reader.next()
-        row = re.split(self._separator, line.rstrip())
+        line = next(self.reader)
+        row = self._row_pattern.split(line.rstrip())
         chrom = row[0]
         if self._prepend_chr:
             chrom = 'chr' + chrom
@@ -553,13 +585,7 @@ class Reader(object):
             except ValueError:
                 qual = None
 
-        filt = row[6]
-        if filt == '.':
-            filt = None
-        elif filt == 'PASS':
-            filt = []
-        else:
-            filt = filt.split(';')
+        filt = self._parse_filter(row[6])
         info = self._parse_info(row[7])
 
         try:
@@ -613,7 +639,8 @@ class Reader(object):
             raise Exception('Please provide a filename (or a "normal" fsock)')
 
         if not self._tabix:
-            self._tabix = pysam.Tabixfile(self.filename)
+            self._tabix = pysam.Tabixfile(self.filename,
+                                          encoding=self.encoding)
 
         if self._prepend_chr and chrom[:3] == 'chr':
             chrom = chrom[3:]
@@ -629,7 +656,9 @@ class Writer(object):
     counts = dict((v,k) for k,v in field_counts.iteritems())
 
     def __init__(self, stream, template, lineterminator="\n"):
-        self.writer = csv.writer(stream, delimiter="\t", lineterminator=lineterminator)
+        self.writer = csv.writer(stream, delimiter="\t",
+                                 lineterminator=lineterminator,
+                                 quotechar='', quoting=csv.QUOTE_NONE)
         self.template = template
         self.stream = stream
 
@@ -661,7 +690,10 @@ class Writer(object):
         for line in template.alts.itervalues():
             stream.write(two.format(key="ALT", *line))
         for line in template.contigs.itervalues():
-            stream.write('##contig=<ID={0},length={1}>\n'.format(*line))
+            if line.length:
+                stream.write('##contig=<ID={0},length={1}>\n'.format(*line))
+            else:
+                stream.write('##contig=<ID={0}>\n'.format(*line))
 
         self._write_header()
 
@@ -721,30 +753,22 @@ class Writer(object):
                         sorted(info, key=order_key))
 
     def _format_sample(self, fmt, sample):
-        try:
-            # Try to get the GT value first.
-            gt = getattr(sample.data, 'GT')
-            # PyVCF stores './.' GT values as None, so we need to revert it back
-            # to './.' when writing.
-            if gt is None:
-                gt = './.'
-        except AttributeError:
-            # Failing that, try to check whether 'GT' is specified in the FORMAT
-            # field. If yes, use the recommended empty value ('./.')
-            if 'GT' in fmt:
-                gt = './.'
-            # Otherwise use an empty string as the value
-            else:
-                gt = ''
-        # If gt is an empty string (i.e. not stored), write all other data
-        if not gt:
-            return ':'.join([self._stringify(x) for x in sample.data])
-        # Otherwise use the GT values from above and combine it with the rest of
-        # the data.
-        # Note that this follows the VCF spec, where GT is always the first
-        # item whenever it is present.
+        if hasattr(sample.data, 'GT'):
+            gt = sample.data.GT
         else:
-            return ':'.join([gt] + [self._stringify(x) for x in sample.data[1:]])
+            gt = './.' if 'GT' in fmt else ''
+
+        result = [gt] if gt else []
+        # Following the VCF spec, GT is always the first item whenever it is present.
+        for field in sample.data._fields:
+            value = getattr(sample.data,field)
+            if field == 'GT':
+                continue
+            if field == 'FT':
+                result.append(self._format_filter(value))
+            else:
+                result.append(self._stringify(value))
+        return ':'.join(result)
 
     def _stringify(self, x, none='.', delim=','):
         if type(x) == type([]):
